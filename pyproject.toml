@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ubuntu-brightness"
+version = "1.1.0"
+description = "Điều chỉnh độ sáng riêng cho từng màn hình trên Ubuntu"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+ubuntu-brightness = "ubuntu_brightness.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["ubuntu_brightness*"]
+
+[tool.setuptools.package-data]
+ubuntu_brightness = ["style.css"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
