@@ -40,13 +40,13 @@ Các gói được dùng: `python3`, `python3-gi`, `python3-gi-cairo`, `gir1.2-g
 ## Sử dụng
 
 1. Chọn màn hình ở danh sách bên trái.
-2. Kéo thanh trượt hoặc nhấn một mức có sẵn. Ứng dụng áp dụng sau khoảng 350 ms kể từ lần kéo cuối cùng.
+2. Kéo thanh trượt hoặc nhấn một mức có sẵn. Ứng dụng áp dụng ngay khi nhấn mức có sẵn hoặc sau khoảng 350 ms kể từ lần kéo cuối cùng.
 3. Dùng **Khôi phục mức ban đầu** để trở lại mức sáng được đọc khi mở ứng dụng. Mức khôi phục được giữ nguyên khi quét lại.
 4. Nhấn `Ctrl+0` để đưa màn hình đã chọn về 100%; phím này dùng được khi ảnh đang đen nếu cửa sổ ứng dụng vẫn được chọn.
 5. Nhấn nút quét lại hoặc `Ctrl+R` sau khi thay đổi kết nối màn hình.
 6. Đóng bằng `Ctrl+Q` hoặc nút đóng cửa sổ. Ứng dụng hoàn tất thay đổi đang chờ trước khi thoát.
 
-Ứng dụng đọc độ sáng hiện tại khi mở hoặc quét lại, rồi đọc kết quả sau mỗi lần điều chỉnh. Mở ứng dụng không tự áp dụng mức sáng. Trong chế độ phần cứng, nhấn quét lại sau khi thay đổi bằng phím laptop hoặc menu màn hình để cập nhật.
+Ứng dụng đọc độ sáng hiện tại khi mở hoặc quét lại, rồi đọc kết quả sau mỗi lần điều chỉnh. Mở ứng dụng không tự áp dụng mức sáng. Trong chế độ phần mềm trên X11, khi cửa sổ đang mở, ứng dụng tự động áp dụng lại mức sáng bạn đã chọn nếu hệ thống đặt lại bảng màu sau khi mở khóa hoặc bật lại màn hình. Trong chế độ phần cứng, nhấn quét lại sau khi thay đổi bằng phím laptop hoặc menu màn hình để cập nhật.
 
 ## Cách điều chỉnh
 

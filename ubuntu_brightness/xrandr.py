@@ -124,7 +124,8 @@ class XrandrBackend:
         validate_percent(percent)
         current = self._current(display)
         result = self.runner([
-            "xrandr", "--output", current.target, "--brightness", f"{percent / 100:.2f}",
+            "xrandr", "--current", "--output", current.target,
+            "--brightness", f"{percent / 100:.2f}",
         ])
         require_success(result, "xrandr")
         return self.read(current)

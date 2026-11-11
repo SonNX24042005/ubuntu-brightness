@@ -11,6 +11,37 @@ from .models import BrightnessError, validate_percent
 from .xrandr import XrandrBackend, is_wayland
 
 
+def _notify_running_app(mode: str, identifier: str, percent: int) -> None:
+    try:
+        from gi.repository import Gio, GLib
+    except ImportError:
+        return
+    app_id = (
+        "io.github.ubuntubrightness.hardware"
+        if mode == "hardware"
+        else "io.github.ubuntubrightness"
+    )
+    object_path = "/" + app_id.replace(".", "/")
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        bus.call_sync(
+            app_id,
+            object_path,
+            "org.gtk.Actions",
+            "Activate",
+            GLib.Variant(
+                "(sava{sv})",
+                ("external-set", [GLib.Variant("(si)", (identifier, percent))], {}),
+            ),
+            None,
+            Gio.DBusCallFlags.NO_AUTO_START,
+            500,
+            None,
+        )
+    except GLib.Error:
+        pass
+
+
 def create_backend(mode: str, demo: bool = False):
     if demo:
         return DemoBackend()
@@ -79,6 +110,10 @@ def main(argv: list[str] | None = None) -> int:
         if selected is None:
             raise BrightnessError("Không tìm thấy mã màn hình. Chạy lệnh list để lấy danh sách hiện tại.")
         brightness = backend.set(selected, options.percent)
+        if not options.demo:
+            _notify_running_app(
+                getattr(backend, "mode", ""), selected.identifier, brightness.percent
+            )
         print(f"{selected.name}: {brightness.percent}%")
         return 0
     except BrightnessError as exc:

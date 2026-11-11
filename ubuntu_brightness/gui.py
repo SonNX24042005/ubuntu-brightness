@@ -36,16 +36,29 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         self.rows = {}
         self.original: dict[str, int] = {}
         self.wanted: dict[str, int] = {}
+        self.targets: dict[str, int] = {}
+        self.applied_percent: dict[str, int] = {}
         self.write_errors: dict[str, str] = {}
+        self._last_notices: tuple[str, ...] = ()
         self._scanning = False
+        self._syncing = False
+        self._screen_locked = False
         self._updating = False
         self._rebuilding = False
         self._closing = False
         self._closed = False
         self._debounce = None
         self._debounced = None
+        self._guard_timer = None
+        self._sync_timers: set[int] = set()
+        self._dbus_bus = None
+        self._dbus_sub = 0
+        self._monitors = None
+        self._monitors_handler = 0
         self._build_ui(demo)
         self.connect("close-request", self._on_close)
+        if self.software and not demo:
+            self._setup_software_guard()
         self.refresh()
 
     def _build_ui(self, demo: bool) -> None:
@@ -140,11 +153,15 @@ class BrightnessWindow(Gtk.ApplicationWindow):
             button = Gtk.Button(label=f"{percent}%")
             if percent == 100:
                 button.set_tooltip_text("Đưa màn hình đã chọn về 100% (Ctrl+0)")
-            button.connect("clicked", lambda _button, value=percent: self.scale.set_value(value))
+            button.connect(
+                "clicked",
+                lambda _button, value=percent: self._request_brightness(value, immediate=True),
+            )
             self.presets.append(button)
         card.append(self.presets)
         hint = label(
-            "Làm tối hình ảnh · 0% = ảnh đen\nCtrl+0: đưa màn hình đã chọn về 100%"
+            "Làm tối hình ảnh · 0% = ảnh đen · Tự giữ mức sáng đã chọn\n"
+            "Ctrl+0: đưa màn hình đã chọn về 100%"
             if self.software else "Điều chỉnh đèn nền của màn hình",
             "muted", 0.5,
         )
@@ -186,8 +203,94 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         row = self.listbox.get_selected_row()
         return self.displays.get(row.identifier) if row else None
 
+    def _setup_software_guard(self) -> None:
+        self.connect("notify::is-active", self._on_active_changed)
+        display = Gdk.Display.get_default()
+        if display is not None:
+            self._monitors = display.get_monitors()
+            self._monitors_handler = self._monitors.connect(
+                "items-changed", self._on_monitors_changed
+            )
+        try:
+            self._dbus_bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            self._dbus_sub = self._dbus_bus.signal_subscribe(
+                None,
+                "org.gnome.ScreenSaver",
+                None,
+                "/org/gnome/ScreenSaver",
+                None,
+                Gio.DBusSignalFlags.NONE,
+                self._on_screensaver_signal,
+            )
+        except GLib.Error:
+            self._dbus_bus = None
+            self._dbus_sub = 0
+        self._guard_timer = GLib.timeout_add_seconds(2, self._on_guard_tick)
+
+    def _cleanup_watchers(self) -> None:
+        if self._guard_timer is not None:
+            GLib.source_remove(self._guard_timer)
+            self._guard_timer = None
+        for timer_id in list(self._sync_timers):
+            GLib.source_remove(timer_id)
+        self._sync_timers.clear()
+        if self._monitors is not None and self._monitors_handler:
+            self._monitors.disconnect(self._monitors_handler)
+            self._monitors_handler = 0
+            self._monitors = None
+        if self._dbus_bus is not None and self._dbus_sub:
+            self._dbus_bus.signal_unsubscribe(self._dbus_sub)
+            self._dbus_sub = 0
+            self._dbus_bus = None
+
+    def _schedule_sync(self, delay_ms: int) -> None:
+        if self._closed or self._closing or not self.software:
+            return
+
+        def fire() -> bool:
+            self._sync_timers.discard(timer_id)
+            self._sync_software_state()
+            return False
+
+        timer_id = GLib.timeout_add(delay_ms, fire)
+        self._sync_timers.add(timer_id)
+
+    def _on_active_changed(self, *_arguments) -> None:
+        if self.is_active():
+            self._sync_software_state()
+
+    def _on_monitors_changed(self, *_arguments) -> None:
+        self._schedule_sync(350)
+        self._schedule_sync(1500)
+
+    def _on_screensaver_signal(
+        self, _connection, _sender, _path, _interface, signal_name, parameters
+    ) -> None:
+        if self._closed or self._closing:
+            return
+        if signal_name == "ActiveChanged" and parameters.n_children() >= 1:
+            (active,) = parameters.unpack()
+            self._screen_locked = bool(active)
+            if not self._screen_locked:
+                self._schedule_sync(300)
+                self._schedule_sync(1500)
+        elif signal_name == "WakeUpScreen" and not self._screen_locked:
+            self._schedule_sync(300)
+            self._schedule_sync(1500)
+
+    def _on_guard_tick(self) -> bool:
+        if self._closed or self._closing:
+            self._guard_timer = None
+            return False
+        if self.targets:
+            self._sync_software_state()
+        return True
+
     def refresh(self) -> None:
         if self._scanning or self.controller.busy or self._debounce or self._closing:
+            return
+        if self._syncing:
+            GLib.timeout_add(50, lambda: (self.refresh(), False)[1])
             return
         self._scanning = True
         self._update_busy()
@@ -197,41 +300,128 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         self.restore_button.set_sensitive(False)
         self.controller.discover(self._on_discovery)
 
+    @staticmethod
+    def _topology_key(displays) -> tuple:
+        return tuple(
+            (item.identifier, item.name, item.connection, item.available, item.error)
+            for item in displays
+        )
+
+    def _apply_discovery(self, discovery, clear_errors: bool = True) -> None:
+        previous = self.selected.identifier if self.selected else None
+        self._rebuilding = True
+        child = self.listbox.get_first_child()
+        while child:
+            self.listbox.remove(child)
+            child = self.listbox.get_first_child()
+        self.displays = {item.identifier: item for item in discovery.displays}
+        self._last_notices = discovery.notices
+        self.rows.clear()
+        if clear_errors:
+            self.write_errors.clear()
+        for display in discovery.displays:
+            if display.brightness:
+                self.original.setdefault(display.identifier, display.brightness.percent)
+            self._append_display(display)
+        self.count_label.set_text(f"{len(discovery.displays)} màn hình được phát hiện")
+        text = "\n".join(notice.splitlines()[0] for notice in discovery.notices)
+        self.notice_label.set_text(text)
+        self.notice_label.set_visible(bool(text))
+        self._rebuilding = False
+        row = self.rows.get(previous, (None, None))[0]
+        if row is None:
+            available = next((item for item in discovery.displays if item.available), None)
+            row = self.rows[available.identifier][0] if available else self.listbox.get_row_at_index(0)
+        self.listbox.select_row(row)
+        self._render(self.selected)
+
+    def _enforce_targets(self) -> None:
+        if not self.software or self._closing or self._closed or self._screen_locked:
+            return
+        changed = False
+        for identifier, target in list(self.targets.items()):
+            display = self.displays.get(identifier)
+            if (
+                display is None
+                or not display.available
+                or identifier in self.write_errors
+                or identifier in self.wanted
+            ):
+                continue
+            expected = self.applied_percent.get(identifier, target)
+            if display.brightness and display.brightness.percent != expected:
+                self.wanted[identifier] = target
+                if identifier in self.rows:
+                    self.rows[identifier][1].set_text(f"{target}%")
+                self.controller.set(display, target, self._on_applied)
+                changed = True
+        if changed:
+            if self.selected:
+                self._render(self.selected)
+            self._update_busy()
+
     def _on_discovery(self, discovery, error) -> None:
         if self._closed:
             return
-        previous = self.selected.identifier if self.selected else None
         self._scanning = False
         if error:
             self.notice_label.set_text(str(error))
             self.notice_label.set_visible(True)
             self._render(self.selected)
         else:
-            self._rebuilding = True
-            child = self.listbox.get_first_child()
-            while child:
-                self.listbox.remove(child)
-                child = self.listbox.get_first_child()
-            self.displays = {item.identifier: item for item in discovery.displays}
-            self.rows.clear()
-            self.write_errors.clear()
-            for display in discovery.displays:
-                if display.brightness:
-                    self.original.setdefault(display.identifier, display.brightness.percent)
-                self._append_display(display)
-            self.count_label.set_text(f"{len(discovery.displays)} màn hình được phát hiện")
-            text = "\n".join(notice.splitlines()[0] for notice in discovery.notices)
-            self.notice_label.set_text(text)
-            self.notice_label.set_visible(bool(text))
-            self._rebuilding = False
-            row = self.rows.get(previous, (None, None))[0]
-            if row is None:
-                available = next((item for item in discovery.displays if item.available), None)
-                row = self.rows[available.identifier][0] if available else self.listbox.get_row_at_index(0)
-            self.listbox.select_row(row)
-            self._render(self.selected)
+            self._apply_discovery(discovery, clear_errors=True)
+            self._enforce_targets()
         self.listbox.set_sensitive(not self._closing)
         self._update_busy()
+
+    def _sync_software_state(self) -> None:
+        if (
+            not self.software
+            or self._closing
+            or self._closed
+            or self._scanning
+            or self._syncing
+            or self._screen_locked
+            or self.controller.busy
+            or self._debounce is not None
+            or bool(self.wanted)
+        ):
+            return
+        self._syncing = True
+        self.controller.discover(self._on_sync)
+
+    def _on_sync(self, discovery, error) -> None:
+        self._syncing = False
+        if self._closed or self._closing or self._scanning or error or discovery is None:
+            return
+        if self._debounce is not None or bool(self.wanted) or self.controller.busy:
+            return
+        for item in discovery.displays:
+            previous = self.displays.get(item.identifier)
+            if item.available and (previous is None or not previous.available):
+                self.write_errors.pop(item.identifier, None)
+        if (
+            self._topology_key(discovery.displays) != self._topology_key(self.displays.values())
+            or discovery.notices != self._last_notices
+        ):
+            self._apply_discovery(discovery, clear_errors=False)
+        else:
+            selected_id = self.selected.identifier if self.selected else None
+            for item in discovery.displays:
+                if item.brightness:
+                    self.original.setdefault(item.identifier, item.brightness.percent)
+                self.displays[item.identifier] = item
+                if (
+                    item.identifier not in self.targets
+                    and item.brightness
+                    and item.identifier in self.rows
+                ):
+                    text = f"{item.brightness.percent}%"
+                    if self.rows[item.identifier][1].get_text() != text:
+                        self.rows[item.identifier][1].set_text(text)
+                        if selected_id == item.identifier:
+                            self._render(item)
+        self._enforce_targets()
 
     def _append_display(self, display: Display) -> None:
         row = Gtk.ListBoxRow()
@@ -250,7 +440,10 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         category = "Màn hình tích hợp" if display.internal else "Màn hình rời"
         description.append(label(category if display.available else "Chưa hỗ trợ", "row-subtitle"))
         box.append(description)
-        value = label(f"{display.brightness.percent}%" if display.brightness else "—", "row-value")
+        shown = self.targets.get(display.identifier)
+        if shown is None or not display.available or display.identifier in self.write_errors:
+            shown = display.brightness.percent if display.brightness else None
+        value = label(f"{shown}%" if shown is not None else "—", "row-value")
         box.append(value)
         row.set_tooltip_text(f"{display.name}\n{display.connection}")
         row.set_child(box)
@@ -300,19 +493,35 @@ class BrightnessWindow(Gtk.ApplicationWindow):
                 self.display_status.set_text("Sẵn sàng · Chỉ điều chỉnh màn hình đã chọn")
         self._updating = False
 
-    def _on_scale_changed(self, scale) -> None:
+    def _request_brightness(self, percent: int, immediate: bool = False) -> None:
         display = self.selected
         if self._updating or not display or not display.available or self._closing:
             return
-        percent = int(scale.get_value() + 0.5)
+        percent = max(0, min(100, int(percent)))
+        self._updating = True
+        self.scale.set_value(percent)
+        self._updating = False
+        self.targets[display.identifier] = percent
+        self.applied_percent.pop(display.identifier, None)
+        self.write_errors.pop(display.identifier, None)
         self.wanted[display.identifier] = percent
         self.percent_label.set_text(f"{percent}%")
         self.display_status.set_text("Đang áp dụng độ sáng cho màn hình này…")
         if self._debounce:
             GLib.source_remove(self._debounce)
-        self._debounced = (display, percent)
-        self._debounce = GLib.timeout_add(350, self._flush_debounce)
+            self._debounce = None
+            self._debounced = None
+        if immediate:
+            self.controller.set(display, percent, self._on_applied)
+        else:
+            self._debounced = (display, percent)
+            self._debounce = GLib.timeout_add(350, self._flush_debounce)
         self._update_busy()
+
+    def _on_scale_changed(self, scale) -> None:
+        if self._updating:
+            return
+        self._request_brightness(int(scale.get_value() + 0.5), immediate=False)
 
     def _flush_debounce(self) -> bool:
         self._debounce = None
@@ -331,7 +540,10 @@ class BrightnessWindow(Gtk.ApplicationWindow):
             return
         if brightness:
             self.displays[identifier] = replace(display, brightness=brightness)
-            self.rows[identifier][1].set_text(f"{brightness.percent}%")
+            if self.targets.get(identifier) == requested:
+                self.applied_percent[identifier] = brightness.percent
+            if identifier in self.rows:
+                self.rows[identifier][1].set_text(f"{brightness.percent}%")
         if self.wanted.get(identifier) == requested:
             self.wanted.pop(identifier, None)
             if error:
@@ -342,14 +554,30 @@ class BrightnessWindow(Gtk.ApplicationWindow):
             self._render(self.selected)
         self._update_busy()
 
+    def apply_external_target(self, identifier: str, percent: int) -> None:
+        if self._closed or self._closing or not 0 <= percent <= 100:
+            return
+        self.targets[identifier] = percent
+        self.applied_percent[identifier] = percent
+        self.write_errors.pop(identifier, None)
+        display = self.displays.get(identifier)
+        if display and display.brightness:
+            raw = display.brightness.raw_value(percent)
+            updated = replace(display, brightness=replace(display.brightness, current=raw))
+            self.displays[identifier] = updated
+            if identifier in self.rows:
+                self.rows[identifier][1].set_text(f"{updated.brightness.percent}%")
+            if self.selected and self.selected.identifier == identifier:
+                self._render(updated)
+
     def _restore(self, _button) -> None:
         display = self.selected
         if display and display.identifier in self.original:
-            self.scale.set_value(self.original[display.identifier])
+            self._request_brightness(self.original[display.identifier], immediate=True)
 
     def reset_to_full(self) -> None:
         if self.selected and self.selected.available and not self._scanning and not self._closing:
-            self.scale.set_value(100)
+            self._request_brightness(100, immediate=True)
 
     def _update_busy(self) -> None:
         busy = self._scanning or self.controller.busy or self._debounce is not None
@@ -365,12 +593,13 @@ class BrightnessWindow(Gtk.ApplicationWindow):
 
     def _show_help(self, _button) -> None:
         help_window = Gtk.Window(title="Hướng dẫn sử dụng", transient_for=self, modal=True)
-        help_window.set_default_size(490, 350)
+        help_window.set_default_size(490, 360)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
         box.add_css_class("main-panel")
         box.append(label("Điều chỉnh từng màn hình", "display-title"))
         mode_help = (
             "Làm tối bằng xrandr: 0% cho ảnh đen, 100% bỏ làm tối hình ảnh. "
+            "Ứng dụng tự giữ mức sáng đã chọn khi hệ thống đặt lại bảng màu. "
             "Đèn nền vẫn giữ mức đang có. Dùng Ctrl+0 khi cửa sổ đang được chọn "
             "để đưa màn hình về 100%.\n\n"
             if self.software else
@@ -398,6 +627,7 @@ class BrightnessWindow(Gtk.ApplicationWindow):
     def _on_close(self, _window) -> bool:
         if self._closing:
             return True
+        self._cleanup_watchers()
         if self._debounce:
             GLib.source_remove(self._debounce)
             self._flush_debounce()
@@ -409,9 +639,10 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         return True
 
     def _finish_close(self) -> bool:
-        if self.controller.busy or self._scanning:
+        if self.controller.busy or self._scanning or self._syncing:
             return True
         self._closed = True
+        self._cleanup_watchers()
         self.controller.close()
         self.get_application().quit()
         return False
@@ -430,6 +661,9 @@ class BrightnessApplication(Gtk.Application):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", self._on_action)
             self.add_action(action)
+        external = Gio.SimpleAction.new("external-set", GLib.VariantType.new("(si)"))
+        external.connect("activate", self._on_external_set)
+        self.add_action(external)
         self.set_accels_for_action("app.refresh", ["<Primary>r"])
         self.set_accels_for_action("app.quit", ["<Primary>q"])
         self.set_accels_for_action("app.full-brightness", ["<Primary>0"])
@@ -442,6 +676,11 @@ class BrightnessApplication(Gtk.Application):
                 self.window.reset_to_full()
             else:
                 self.window.close()
+
+    def _on_external_set(self, _action, parameter) -> None:
+        if self.window and parameter is not None:
+            identifier, percent = parameter.unpack()
+            self.window.apply_external_target(identifier, percent)
 
     def do_activate(self) -> None:
         if self.window is None:
