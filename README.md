@@ -44,9 +44,10 @@ Các gói được dùng: `python3`, `python3-gi`, `python3-gi-cairo`, `gir1.2-g
 3. Dùng **Khôi phục mức ban đầu** để trở lại mức sáng được đọc khi mở ứng dụng. Mức khôi phục được giữ nguyên khi quét lại.
 4. Nhấn `Ctrl+0` để đưa màn hình đã chọn về 100%; phím này dùng được khi ảnh đang đen nếu cửa sổ ứng dụng vẫn được chọn.
 5. Nhấn nút quét lại hoặc `Ctrl+R` sau khi thay đổi kết nối màn hình.
-6. Đóng bằng `Ctrl+Q` hoặc nút đóng cửa sổ. Ứng dụng hoàn tất thay đổi đang chờ trước khi thoát.
+6. Đóng cửa sổ bằng nút `×` hoặc `Ctrl+Q` để ẩn ứng dụng xuống biểu tượng trên thanh tác vụ. Ứng dụng tiếp tục chạy ngầm trong phiên đăng nhập hiện tại để giữ mức sáng đã chọn.
+7. Mở lại cửa sổ hoặc chỉnh nhanh từng màn hình từ biểu tượng trên thanh tác vụ. Khi muốn dừng chạy ngầm hoàn toàn, nhấn **Thoát hẳn ứng dụng** trong cửa sổ, chọn trong menu khay hệ thống hoặc chạy `./run.sh --quit`.
 
-Ứng dụng đọc độ sáng hiện tại khi mở hoặc quét lại, rồi đọc kết quả sau mỗi lần điều chỉnh. Mở ứng dụng không tự áp dụng mức sáng. Trong chế độ phần mềm trên X11, khi cửa sổ đang mở, ứng dụng tự động áp dụng lại mức sáng bạn đã chọn nếu hệ thống đặt lại bảng màu sau khi mở khóa hoặc bật lại màn hình. Trong chế độ phần cứng, nhấn quét lại sau khi thay đổi bằng phím laptop hoặc menu màn hình để cập nhật.
+Ứng dụng đọc độ sáng hiện tại khi mở hoặc quét lại, rồi đọc kết quả sau mỗi lần điều chỉnh. Mở ứng dụng không tự áp dụng mức sáng. Trong chế độ phần mềm trên X11, ứng dụng tự động áp dụng lại mức sáng bạn đã chọn kể cả khi đã đóng cửa sổ ẩn xuống khay hệ thống nếu hệ thống đặt lại bảng màu sau khi mở khóa hoặc bật lại màn hình; khi khởi động lại máy hoặc đăng xuất, màn hình trở về mặc định 100%. Trong chế độ phần cứng, nhấn quét lại sau khi thay đổi bằng phím laptop hoặc menu màn hình để cập nhật.
 
 ## Cách điều chỉnh
 
@@ -138,6 +139,9 @@ Dùng `./run.sh` để chọn Python hệ thống `/usr/bin/python3`, nơi Ubunt
 # Kiểm tra bằng dữ liệu giả lập
 ./run.sh --demo list --json
 ./run.sh --demo set demo:dell 50
+
+# Dừng hẳn ứng dụng đang chạy ngầm
+./run.sh --quit
 ```
 
 Mỗi lần chạy `--demo` khởi tạo lại ba màn hình giả lập. Tên đầu ra X11 và mã bus I²C có thể thay đổi sau khi cắm/rút hoặc khởi động lại; lấy lại mã từ `list` trước khi dùng trong script.
@@ -153,6 +157,7 @@ xrandr --output HDMI-1 --brightness 1
 | Tệp | Vai trò |
 | --- | --- |
 | `ubuntu_brightness/gui.py` | Cửa sổ GTK, lựa chọn màn hình, thanh trượt và trạng thái |
+| `ubuntu_brightness/tray.py` | Biểu tượng khay hệ thống và menu điều khiển nhanh qua D-Bus |
 | `ubuntu_brightness/backends.py` | Dò màn hình, đọc đèn nền, chạy `ddcutil`/`brightnessctl` và giả lập |
 | `ubuntu_brightness/xrandr.py` | Đọc đầu ra X11, nhận diện màn hình và làm tối bằng `xrandr` |
 | `ubuntu_brightness/controller.py` | Hàng đợi tuần tự, gộp yêu cầu và trả kết quả về giao diện |

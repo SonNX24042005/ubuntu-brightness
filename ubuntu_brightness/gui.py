@@ -11,6 +11,7 @@ from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from .controller import Controller
 from .models import BrightnessError, Display
+from .tray import TrayIcon
 
 
 def label(text: str = "", css: str = "", xalign: float = 0) -> Gtk.Label:
@@ -55,8 +56,11 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         self._dbus_sub = 0
         self._monitors = None
         self._monitors_handler = 0
+        self._keep_in_background = not demo
+        self.tray: TrayIcon | None = None
         self._build_ui(demo)
         self.connect("close-request", self._on_close)
+        self.connect("notify::visible", lambda *_args: self._update_tray())
         if self.software and not demo:
             self._setup_software_guard()
         self.refresh()
@@ -174,6 +178,12 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         self.restore_button.set_tooltip_text("Khôi phục độ sáng được đọc khi mở ứng dụng")
         self.restore_button.connect("clicked", self._restore)
         actions.append(self.restore_button)
+        self.quit_button = Gtk.Button(label="Thoát hẳn ứng dụng")
+        self.quit_button.set_tooltip_text(
+            "Dừng giữ độ sáng chạy ngầm và đóng hoàn toàn ứng dụng"
+        )
+        self.quit_button.connect("clicked", lambda _button: self.quit_completely())
+        actions.append(self.quit_button)
         main.append(actions)
         self.display_status = label("Đang đọc thông tin màn hình…", "muted")
         self.display_status.set_wrap(True)
@@ -371,6 +381,7 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         else:
             self._apply_discovery(discovery, clear_errors=True)
             self._enforce_targets()
+            self._update_tray()
         self.listbox.set_sensitive(not self._closing)
         self._update_busy()
 
@@ -422,6 +433,7 @@ class BrightnessWindow(Gtk.ApplicationWindow):
                         if selected_id == item.identifier:
                             self._render(item)
         self._enforce_targets()
+        self._update_tray()
 
     def _append_display(self, display: Display) -> None:
         row = Gtk.ListBoxRow()
@@ -465,6 +477,7 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         self.scale.set_sensitive(available)
         self.presets.set_sensitive(available)
         self.restore_button.set_sensitive(available)
+        self.quit_button.set_sensitive(not self._closing)
         if display is None:
             self.name_label.set_text("Đang tìm màn hình…" if self._scanning else "Chưa tìm thấy màn hình")
             self.connection_label.set_text("Kết nối màn hình rồi nhấn nút quét lại.")
@@ -493,9 +506,44 @@ class BrightnessWindow(Gtk.ApplicationWindow):
                 self.display_status.set_text("Sẵn sàng · Chỉ điều chỉnh màn hình đã chọn")
         self._updating = False
 
+    def set_display_brightness(self, identifier: str, percent: int) -> None:
+        display = self.displays.get(identifier)
+        if not display or not display.available or self._closing or self._closed:
+            return
+        percent = max(0, min(100, int(percent)))
+        if self.selected and self.selected.identifier == identifier:
+            self._updating = True
+            self.scale.set_value(percent)
+            self._updating = False
+            self.percent_label.set_text(f"{percent}%")
+            self.display_status.set_text("Đang áp dụng độ sáng cho màn hình này…")
+            if self._debounce:
+                GLib.source_remove(self._debounce)
+                self._debounce = None
+                self._debounced = None
+        self.targets[identifier] = percent
+        self.applied_percent.pop(identifier, None)
+        self.write_errors.pop(identifier, None)
+        self.wanted[identifier] = percent
+        if identifier in self.rows:
+            self.rows[identifier][1].set_text(f"{percent}%")
+        self.controller.set(display, percent, self._on_applied)
+        self._update_busy()
+        self._update_tray()
+
+    def reset_all_to_full(self) -> None:
+        if self._scanning or self._closing or self._closed:
+            return
+        for display in list(self.displays.values()):
+            if display.available:
+                self.set_display_brightness(display.identifier, 100)
+
     def _request_brightness(self, percent: int, immediate: bool = False) -> None:
         display = self.selected
         if self._updating or not display or not display.available or self._closing:
+            return
+        if immediate:
+            self.set_display_brightness(display.identifier, percent)
             return
         percent = max(0, min(100, int(percent)))
         self._updating = True
@@ -509,14 +557,10 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         self.display_status.set_text("Đang áp dụng độ sáng cho màn hình này…")
         if self._debounce:
             GLib.source_remove(self._debounce)
-            self._debounce = None
-            self._debounced = None
-        if immediate:
-            self.controller.set(display, percent, self._on_applied)
-        else:
-            self._debounced = (display, percent)
-            self._debounce = GLib.timeout_add(350, self._flush_debounce)
+        self._debounced = (display, percent)
+        self._debounce = GLib.timeout_add(350, self._flush_debounce)
         self._update_busy()
+        self._update_tray()
 
     def _on_scale_changed(self, scale) -> None:
         if self._updating:
@@ -553,6 +597,7 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         if self.selected and self.selected.identifier == identifier:
             self._render(self.selected)
         self._update_busy()
+        self._update_tray()
 
     def apply_external_target(self, identifier: str, percent: int) -> None:
         if self._closed or self._closing or not 0 <= percent <= 100:
@@ -569,6 +614,20 @@ class BrightnessWindow(Gtk.ApplicationWindow):
                 self.rows[identifier][1].set_text(f"{updated.brightness.percent}%")
             if self.selected and self.selected.identifier == identifier:
                 self._render(updated)
+        self._update_tray()
+
+    def _update_tray(self) -> None:
+        if self.tray is None or self._closed:
+            return
+        items: list[tuple[str, str, int | None, bool]] = []
+        for display in self.displays.values():
+            percent = self.wanted.get(display.identifier)
+            if percent is None:
+                percent = self.targets.get(display.identifier)
+            if percent is None or not display.available or display.identifier in self.write_errors:
+                percent = display.brightness.percent if display.brightness else None
+            items.append((display.identifier, display.name, percent, display.available))
+        self.tray.update(self.get_visible(), items)
 
     def _restore(self, _button) -> None:
         display = self.selected
@@ -606,6 +665,11 @@ class BrightnessWindow(Gtk.ApplicationWindow):
             "Màn hình rời cần hỗ trợ và bật DDC/CI trong menu của màn hình. "
             "Mức đèn nền 0% có thể vẫn sáng tùy thiết bị.\n\n"
         )
+        quit_hint = (
+            "Ctrl+Q: ẩn xuống khay hệ thống."
+            if self._keep_in_background
+            else "Ctrl+Q: đóng ứng dụng."
+        )
         instructions = label(
             "1. Chọn màn hình trong danh sách bên trái.\n\n"
             "2. Kéo thanh trượt hoặc chọn một mức sáng có sẵn. "
@@ -613,7 +677,7 @@ class BrightnessWindow(Gtk.ApplicationWindow):
             "3. Nhấn nút quét lại sau khi cắm hoặc rút màn hình.\n\n"
             + mode_help +
             "Nếu báo thiếu công cụ hoặc thiếu quyền, xem README.md trong thư mục dự án.\n\n"
-            "Ctrl+0: về 100%. Ctrl+R: quét lại. Ctrl+Q: đóng ứng dụng."
+            f"Ctrl+0: về 100%. Ctrl+R: quét lại. {quit_hint}"
         )
         instructions.set_wrap(True)
         instructions.set_max_width_chars(60)
@@ -624,9 +688,34 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         help_window.set_child(box)
         help_window.present()
 
-    def _on_close(self, _window) -> bool:
-        if self._closing:
-            return True
+    def hide_to_background(self) -> None:
+        if self._closing or self._closed:
+            return
+        if self._debounce:
+            GLib.source_remove(self._debounce)
+            self._flush_debounce()
+        self.set_visible(False)
+        self._update_tray()
+
+    def show_from_background(self) -> None:
+        if self._closing or self._closed:
+            return
+        self.set_visible(True)
+        self.present()
+        self._sync_software_state()
+        self._update_tray()
+
+    def toggle_visibility(self) -> None:
+        if self._closing or self._closed:
+            return
+        if self.get_visible():
+            self.hide_to_background()
+        else:
+            self.show_from_background()
+
+    def quit_completely(self) -> None:
+        if self._closing or self._closed:
+            return
         self._cleanup_watchers()
         if self._debounce:
             GLib.source_remove(self._debounce)
@@ -636,6 +725,14 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         self._render(self.selected)
         self._update_busy()
         GLib.timeout_add(50, self._finish_close)
+
+    def _on_close(self, _window) -> bool:
+        if self._closing:
+            return True
+        if self._keep_in_background:
+            self.hide_to_background()
+            return True
+        self.quit_completely()
         return True
 
     def _finish_close(self) -> bool:
@@ -643,8 +740,18 @@ class BrightnessWindow(Gtk.ApplicationWindow):
             return True
         self._closed = True
         self._cleanup_watchers()
+        if self.tray is not None:
+            self.tray.close()
+            self.tray = None
         self.controller.close()
-        self.get_application().quit()
+        app = self.get_application()
+        if app is not None:
+            if getattr(app, "_held", False):
+                app._held = False
+                app.release()
+            app.quit()
+        else:
+            self.destroy()
         return False
 
 
@@ -657,7 +764,8 @@ class BrightnessApplication(Gtk.Application):
         self.backend = backend
         self.demo = demo
         self.window = None
-        for name in ("refresh", "quit", "full-brightness"):
+        self._held = False
+        for name in ("refresh", "quit", "full-quit", "full-brightness"):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", self._on_action)
             self.add_action(action)
@@ -670,10 +778,13 @@ class BrightnessApplication(Gtk.Application):
 
     def _on_action(self, action, _parameter) -> None:
         if self.window:
-            if action.get_name() == "refresh":
+            name = action.get_name()
+            if name == "refresh":
                 self.window.refresh()
-            elif action.get_name() == "full-brightness":
+            elif name == "full-brightness":
                 self.window.reset_to_full()
+            elif name == "full-quit":
+                self.window.quit_completely()
             else:
                 self.window.close()
 
@@ -690,7 +801,19 @@ class BrightnessApplication(Gtk.Application):
                 Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
             )
             self.window = BrightnessWindow(self, self.backend, self.demo)
-        self.window.present()
+            if not self.demo:
+                self.hold()
+                self._held = True
+                self.window.tray = TrayIcon(
+                    app_id=self.get_application_id(),
+                    on_toggle_window=self.window.toggle_visibility,
+                    on_set_display=self.window.set_display_brightness,
+                    on_reset_all=self.window.reset_all_to_full,
+                    on_refresh=self.window.refresh,
+                    on_quit=self.window.quit_completely,
+                )
+                self.window._update_tray()
+        self.window.show_from_background()
 
 
 def launch(backend, demo: bool = False) -> int:
