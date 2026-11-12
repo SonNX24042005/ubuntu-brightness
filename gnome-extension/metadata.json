@@ -1,0 +1,9 @@
+{
+  "uuid": "ubuntu-brightness@ubuntubrightness.github.io",
+  "name": "Độ sáng màn hình",
+  "description": "Phím tắt đưa tất cả màn hình về 100%, dùng được cả ở màn hình khóa. Đi kèm ứng dụng ubuntu-brightness.",
+  "shell-version": ["45", "46", "47", "48"],
+  "session-modes": ["user", "unlock-dialog"],
+  "settings-schema": "org.gnome.shell.extensions.ubuntu-brightness",
+  "version": 1
+}

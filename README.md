@@ -5,7 +5,7 @@
 - Làm tối từng đầu ra X11 bằng `xrandr`, với tên kết nối chính xác từ phiên desktop.
 - Chế độ phần cứng điều khiển đèn nền laptop bằng `brightnessctl` và màn hình rời hỗ trợ DDC/CI bằng `ddcutil`.
 - Thanh trượt 0–100%, các mức nhanh 0/25/50/75/100% và khôi phục mức sáng khi mở ứng dụng.
-- Phím `Ctrl+0` đưa màn hình đang chọn về 100% khi cửa sổ ứng dụng đang được chọn.
+- Phím tắt toàn cục `Super+Alt+0` đưa tất cả màn hình về 100%, dùng được cả khi cửa sổ đã ẩn, đang dùng ứng dụng khác, đã thoát hẳn ứng dụng và ở màn hình khóa; đổi được phím trong cửa sổ để tránh trùng.
 - Quét lại thiết bị khi cắm hoặc rút màn hình; hiển thị tên, kết nối và trạng thái hỗ trợ.
 - Chạy lệnh điều chỉnh ngoài luồng giao diện; gộp các lần kéo liên tiếp và giữ đúng màn hình khi chuyển lựa chọn.
 - Chế độ xem thử với ba màn hình giả lập và công cụ dòng lệnh để kiểm tra thiết bị.
@@ -42,12 +42,39 @@ Các gói được dùng: `python3`, `python3-gi`, `python3-gi-cairo`, `gir1.2-g
 1. Chọn màn hình ở danh sách bên trái.
 2. Kéo thanh trượt hoặc nhấn một mức có sẵn. Ứng dụng áp dụng ngay khi nhấn mức có sẵn hoặc sau khoảng 350 ms kể từ lần kéo cuối cùng.
 3. Dùng **Khôi phục mức ban đầu** để trở lại mức sáng được đọc khi mở ứng dụng. Mức khôi phục được giữ nguyên khi quét lại.
-4. Nhấn `Ctrl+0` để đưa màn hình đã chọn về 100%; phím này dùng được khi ảnh đang đen nếu cửa sổ ứng dụng vẫn được chọn.
+4. Nhấn `Super+Alt+0` để đưa tất cả màn hình về 100%, kể cả khi ảnh đang đen, cửa sổ không được chọn hoặc đang ở màn hình khóa. Xem mục phím tắt toàn cục bên dưới để đổi phím.
 5. Nhấn nút quét lại hoặc `Ctrl+R` sau khi thay đổi kết nối màn hình.
 6. Đóng cửa sổ bằng nút `×` hoặc `Ctrl+Q` để ẩn ứng dụng xuống biểu tượng trên thanh tác vụ. Ứng dụng tiếp tục chạy ngầm trong phiên đăng nhập hiện tại để giữ mức sáng đã chọn.
 7. Mở lại cửa sổ hoặc chỉnh nhanh từng màn hình từ biểu tượng trên thanh tác vụ. Khi muốn dừng chạy ngầm hoàn toàn, nhấn **Thoát hẳn ứng dụng** trong cửa sổ, chọn trong menu khay hệ thống hoặc chạy `./run.sh --quit`.
 
-Ứng dụng đọc độ sáng hiện tại khi mở hoặc quét lại, rồi đọc kết quả sau mỗi lần điều chỉnh. Mở ứng dụng không tự áp dụng mức sáng. Trong chế độ phần mềm trên X11, ứng dụng tự động áp dụng lại mức sáng bạn đã chọn kể cả khi đã đóng cửa sổ ẩn xuống khay hệ thống nếu hệ thống đặt lại bảng màu sau khi mở khóa hoặc bật lại màn hình; khi khởi động lại máy hoặc đăng xuất, màn hình trở về mặc định 100%. Trong chế độ phần cứng, nhấn quét lại sau khi thay đổi bằng phím laptop hoặc menu màn hình để cập nhật.
+Ứng dụng đọc độ sáng hiện tại khi mở hoặc quét lại, rồi đọc kết quả sau mỗi lần điều chỉnh. Mở ứng dụng không tự áp dụng mức sáng. Trong chế độ phần mềm trên X11, ứng dụng tự động áp dụng lại mức sáng bạn đã chọn kể cả khi đã đóng cửa sổ ẩn xuống khay hệ thống nếu hệ thống đặt lại bảng màu khi khóa, mở khóa hoặc bật lại màn hình. Màn hình khóa cũng giữ đúng mức sáng đã chọn, kể cả 0%; nếu không nhìn thấy ô mật khẩu, nhấn phím tắt toàn cục để về 100%. Nếu lần ghi bị lỗi vì hệ thống đang tắt hoặc cấu hình lại màn hình, ứng dụng tự thử lại sau 5 giây; khi khởi động lại máy hoặc đăng xuất, màn hình trở về mặc định 100%. Trong chế độ phần cứng, nhấn quét lại sau khi thay đổi bằng phím laptop hoặc menu màn hình để cập nhật.
+
+## Phím tắt toàn cục
+
+Phím mặc định là `Super+Alt+0` và chạy lệnh `./run.sh reset`:
+
+- Nếu ứng dụng đang chạy, lệnh yêu cầu ứng dụng đưa tất cả màn hình về 100% để cơ chế giữ mức sáng không làm tối lại.
+- Nếu ứng dụng không chạy, lệnh điều chỉnh trực tiếp tất cả màn hình hỗ trợ.
+
+GNOME 46 chỉ cho phím tắt tùy chỉnh chạy ở desktop và màn tổng quan, không chạy ở màn hình khóa. Vì vậy ứng dụng đi kèm một extension GNOME Shell nhỏ trong thư mục `gnome-extension/` (`ubuntu-brightness@ubuntubrightness.github.io`), khai báo hỗ trợ màn hình khóa (`session-modes: user, unlock-dialog`). Khi mở ứng dụng hoặc chạy `./scripts/install.sh`:
+
+1. Ứng dụng chép extension vào `~/.local/share/gnome-shell/extensions/`, biên dịch schema và bật extension.
+2. Trong lúc GNOME Shell chưa nạp extension, ứng dụng tạo phím tắt tùy chỉnh của GNOME tên **Độ sáng màn hình: đưa tất cả về 100%** để phím vẫn dùng được ngoài màn hình khóa.
+3. Khởi động lại GNOME Shell **một lần** để nạp extension: trên X11 nhấn `Alt+F2`, gõ `r` rồi `Enter` (các cửa sổ vẫn giữ nguyên); trên Wayland đăng xuất rồi đăng nhập lại.
+4. Khi chạy, extension tự chuyển phím tắt tùy chỉnh ở bước 2 sang chính nó và giữ phím ở mọi chế độ, kể cả màn hình khóa. Mục trong **Cài đặt → Bàn phím → Phím tắt tùy chỉnh** được gỡ để hai nơi không tranh cùng một phím.
+
+Nếu extension bị tắt hoặc lỗi, ứng dụng tự quay về phím tắt tùy chỉnh ở lần mở sau. Dòng trạng thái dưới phím tắt trong cửa sổ cho biết phím đã dùng được ở màn hình khóa hay chưa.
+
+Đổi phím trong cửa sổ ứng dụng ở phần **Phím tắt đưa tất cả màn hình về 100%**: nhấn **Đổi phím tắt**, bấm tổ hợp mới rồi **Lưu**. Hộp thoại cảnh báo nếu tổ hợp trùng với phím tắt khác của GNOME. Phím tắt riêng trong từng ứng dụng, ví dụ `Ctrl+0` của trình duyệt, không được kiểm tra, nên hãy tránh các tổ hợp quen thuộc này.
+
+```bash
+./run.sh shortcut                        # xem phím hiện tại và trạng thái màn hình khóa
+./run.sh shortcut --set '<Ctrl><Alt>b'   # đổi phím
+./run.sh shortcut --default              # về Super+Alt+0
+./run.sh shortcut --disable              # tắt phím tắt
+```
+
+Nếu di chuyển thư mục dự án, mở lại ứng dụng hoặc chạy `./run.sh shortcut --ensure` để cập nhật đường dẫn lệnh.
 
 ## Cách điều chỉnh
 
@@ -140,6 +167,9 @@ Dùng `./run.sh` để chọn Python hệ thống `/usr/bin/python3`, nơi Ubunt
 ./run.sh --demo list --json
 ./run.sh --demo set demo:dell 50
 
+# Đưa tất cả màn hình về 100% (lệnh của phím tắt toàn cục)
+./run.sh reset
+
 # Dừng hẳn ứng dụng đang chạy ngầm
 ./run.sh --quit
 ```
@@ -163,7 +193,9 @@ xrandr --output HDMI-1 --brightness 1
 | `ubuntu_brightness/controller.py` | Hàng đợi tuần tự, gộp yêu cầu và trả kết quả về giao diện |
 | `ubuntu_brightness/models.py` | Thiết bị, độ sáng và xác thực giá trị |
 | `ubuntu_brightness/style.css` | Giao diện theo theme GTK và màu nhấn Ubuntu |
-| `scripts/install.sh` | Cài phụ thuộc, module và biểu tượng ứng dụng |
+| `ubuntu_brightness/shortcut.py` | Cài extension, tạo, đổi và kiểm tra trùng phím tắt toàn cục |
+| `gnome-extension/` | Extension GNOME Shell giữ phím tắt ở mọi chế độ, kể cả màn hình khóa |
+| `scripts/install.sh` | Cài phụ thuộc, module, biểu tượng ứng dụng và phím tắt toàn cục |
 
 ## Gỡ mục ứng dụng
 
@@ -171,4 +203,11 @@ xrandr --output HDMI-1 --brightness 1
 rm -- "${XDG_DATA_HOME:-$HOME/.local/share}/applications/io.github.ubuntubrightness.desktop"
 ```
 
-Lệnh này gỡ biểu tượng trong menu ứng dụng; mã nguồn và các gói hệ thống vẫn được giữ lại.
+Lệnh này gỡ biểu tượng trong menu ứng dụng; mã nguồn và các gói hệ thống vẫn được giữ lại. Để gỡ phím tắt toàn cục, thoát hẳn ứng dụng rồi chạy:
+
+```bash
+gnome-extensions disable ubuntu-brightness@ubuntubrightness.github.io
+rm -r -- "${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/ubuntu-brightness@ubuntubrightness.github.io"
+```
+
+Sau đó xóa mục **Độ sáng màn hình: đưa tất cả về 100%** trong **Cài đặt → Bàn phím → Phím tắt tùy chỉnh** nếu còn. Lần mở ứng dụng sau sẽ cài lại phím mặc định. Muốn giữ ứng dụng nhưng tắt phím, dùng `./run.sh shortcut --disable`.

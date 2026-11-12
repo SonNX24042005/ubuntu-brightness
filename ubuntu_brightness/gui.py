@@ -9,9 +9,13 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
+from . import shortcut
 from .controller import Controller
 from .models import BrightnessError, Display
 from .tray import TrayIcon
+
+# Thời gian chờ trước khi thử ghi lại mức sáng sau khi lỗi, tính bằng micro giây.
+RETRY_AFTER_ERROR_US = 5_000_000
 
 
 def label(text: str = "", css: str = "", xalign: float = 0) -> Gtk.Label:
@@ -40,10 +44,10 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         self.targets: dict[str, int] = {}
         self.applied_percent: dict[str, int] = {}
         self.write_errors: dict[str, str] = {}
+        self._failed_at: dict[str, int] = {}
         self._last_notices: tuple[str, ...] = ()
         self._scanning = False
         self._syncing = False
-        self._screen_locked = False
         self._updating = False
         self._rebuilding = False
         self._closing = False
@@ -57,8 +61,12 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         self._monitors = None
         self._monitors_handler = 0
         self._keep_in_background = not demo
+        self._shortcut_binding = ""
+        self._shortcut_global = False
+        self._shortcut_watchers: list[tuple[Gio.Settings, int]] = []
         self.tray: TrayIcon | None = None
         self._build_ui(demo)
+        self._load_shortcut(demo)
         self.connect("close-request", self._on_close)
         self.connect("notify::visible", lambda *_args: self._update_tray())
         if self.software and not demo:
@@ -156,7 +164,7 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         for percent in (0, 25, 50, 75, 100):
             button = Gtk.Button(label=f"{percent}%")
             if percent == 100:
-                button.set_tooltip_text("Đưa màn hình đã chọn về 100% (Ctrl+0)")
+                button.set_tooltip_text("Đưa màn hình đã chọn về 100%")
             button.connect(
                 "clicked",
                 lambda _button, value=percent: self._request_brightness(value, immediate=True),
@@ -164,8 +172,7 @@ class BrightnessWindow(Gtk.ApplicationWindow):
             self.presets.append(button)
         card.append(self.presets)
         hint = label(
-            "Làm tối hình ảnh · 0% = ảnh đen · Tự giữ mức sáng đã chọn\n"
-            "Ctrl+0: đưa màn hình đã chọn về 100%"
+            "Làm tối hình ảnh · 0% = ảnh đen · Tự giữ mức sáng đã chọn"
             if self.software else "Điều chỉnh đèn nền của màn hình",
             "muted", 0.5,
         )
@@ -185,6 +192,32 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         self.quit_button.connect("clicked", lambda _button: self.quit_completely())
         actions.append(self.quit_button)
         main.append(actions)
+
+        self.shortcut_card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        self.shortcut_card.add_css_class("shortcut-card")
+        self.shortcut_card.append(label("Phím tắt đưa tất cả màn hình về 100%", "section-title"))
+        shortcut_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.shortcut_label = label("Chưa đặt", "shortcut-key")
+        shortcut_row.append(self.shortcut_label)
+        shortcut_row.append(Gtk.Box(hexpand=True))
+        self.shortcut_change = Gtk.Button(label="Đổi phím tắt")
+        self.shortcut_change.set_tooltip_text("Ghi tổ hợp phím mới để tránh trùng với ứng dụng khác")
+        self.shortcut_change.connect("clicked", self._edit_shortcut)
+        shortcut_row.append(self.shortcut_change)
+        self.shortcut_default = Gtk.Button(label="Dùng mặc định")
+        self.shortcut_default.set_tooltip_text(
+            f"Đặt lại {shortcut.display_label(shortcut.DEFAULT_BINDING)}"
+        )
+        self.shortcut_default.connect(
+            "clicked", lambda _button: self._save_shortcut(shortcut.DEFAULT_BINDING)
+        )
+        shortcut_row.append(self.shortcut_default)
+        self.shortcut_card.append(shortcut_row)
+        self.shortcut_status = label("", "muted")
+        self.shortcut_status.set_wrap(True)
+        self.shortcut_card.append(self.shortcut_status)
+        self.shortcut_card.set_visible(not demo)
+        main.append(self.shortcut_card)
         self.display_status = label("Đang đọc thông tin màn hình…", "muted")
         self.display_status.set_wrap(True)
         main.append(self.display_status)
@@ -278,13 +311,9 @@ class BrightnessWindow(Gtk.ApplicationWindow):
     ) -> None:
         if self._closed or self._closing:
             return
-        if signal_name == "ActiveChanged" and parameters.n_children() >= 1:
-            (active,) = parameters.unpack()
-            self._screen_locked = bool(active)
-            if not self._screen_locked:
-                self._schedule_sync(300)
-                self._schedule_sync(1500)
-        elif signal_name == "WakeUpScreen" and not self._screen_locked:
+        # Khóa, mở khóa hoặc đánh thức màn hình đều có thể làm hệ thống đặt lại bảng màu,
+        # kể cả khi đang ở màn hình khóa, nên áp dụng lại mức sáng đã chọn ngay sau đó.
+        if signal_name in ("ActiveChanged", "WakeUpScreen"):
             self._schedule_sync(300)
             self._schedule_sync(1500)
 
@@ -346,7 +375,7 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         self._render(self.selected)
 
     def _enforce_targets(self) -> None:
-        if not self.software or self._closing or self._closed or self._screen_locked:
+        if not self.software or self._closing or self._closed:
             return
         changed = False
         for identifier, target in list(self.targets.items()):
@@ -354,7 +383,7 @@ class BrightnessWindow(Gtk.ApplicationWindow):
             if (
                 display is None
                 or not display.available
-                or identifier in self.write_errors
+                or self._blocked_by_error(identifier)
                 or identifier in self.wanted
             ):
                 continue
@@ -369,6 +398,14 @@ class BrightnessWindow(Gtk.ApplicationWindow):
             if self.selected:
                 self._render(self.selected)
             self._update_busy()
+
+    def _blocked_by_error(self, identifier: str) -> bool:
+        # Lỗi ghi thường chỉ tạm thời khi hệ thống tắt hoặc cấu hình lại màn hình, ví dụ lúc
+        # khóa màn hình; thử lại sau vài giây thay vì ngừng giữ mức sáng.
+        if identifier not in self.write_errors:
+            return False
+        elapsed = GLib.get_monotonic_time() - self._failed_at.get(identifier, 0)
+        return elapsed < RETRY_AFTER_ERROR_US
 
     def _on_discovery(self, discovery, error) -> None:
         if self._closed:
@@ -392,7 +429,6 @@ class BrightnessWindow(Gtk.ApplicationWindow):
             or self._closed
             or self._scanning
             or self._syncing
-            or self._screen_locked
             or self.controller.busy
             or self._debounce is not None
             or bool(self.wanted)
@@ -532,7 +568,11 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         self._update_tray()
 
     def reset_all_to_full(self) -> None:
-        if self._scanning or self._closing or self._closed:
+        if self._closing or self._closed:
+            return
+        if self._scanning:
+            # Phím tắt có thể đến khi đang quét; áp dụng ngay sau khi quét xong.
+            GLib.timeout_add(100, lambda: (self.reset_all_to_full(), False)[1])
             return
         for display in list(self.displays.values()):
             if display.available:
@@ -592,6 +632,7 @@ class BrightnessWindow(Gtk.ApplicationWindow):
             self.wanted.pop(identifier, None)
             if error:
                 self.write_errors[identifier] = str(error)
+                self._failed_at[identifier] = GLib.get_monotonic_time()
             else:
                 self.write_errors.pop(identifier, None)
         if self.selected and self.selected.identifier == identifier:
@@ -634,10 +675,6 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         if display and display.identifier in self.original:
             self._request_brightness(self.original[display.identifier], immediate=True)
 
-    def reset_to_full(self) -> None:
-        if self.selected and self.selected.available and not self._scanning and not self._closing:
-            self._request_brightness(100, immediate=True)
-
     def _update_busy(self) -> None:
         busy = self._scanning or self.controller.busy or self._debounce is not None
         self.refresh_button.set_sensitive(not busy and not self._closing)
@@ -658,9 +695,9 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         box.append(label("Điều chỉnh từng màn hình", "display-title"))
         mode_help = (
             "Làm tối bằng xrandr: 0% cho ảnh đen, 100% bỏ làm tối hình ảnh. "
-            "Ứng dụng tự giữ mức sáng đã chọn khi hệ thống đặt lại bảng màu. "
-            "Đèn nền vẫn giữ mức đang có. Dùng Ctrl+0 khi cửa sổ đang được chọn "
-            "để đưa màn hình về 100%.\n\n"
+            "Ứng dụng tự giữ mức sáng đã chọn khi hệ thống đặt lại bảng màu, "
+            "kể cả ở màn hình khóa. "
+            "Đèn nền vẫn giữ mức đang có.\n\n"
             if self.software else
             "Màn hình rời cần hỗ trợ và bật DDC/CI trong menu của màn hình. "
             "Mức đèn nền 0% có thể vẫn sáng tùy thiết bị.\n\n"
@@ -677,7 +714,10 @@ class BrightnessWindow(Gtk.ApplicationWindow):
             "3. Nhấn nút quét lại sau khi cắm hoặc rút màn hình.\n\n"
             + mode_help +
             "Nếu báo thiếu công cụ hoặc thiếu quyền, xem README.md trong thư mục dự án.\n\n"
-            f"Ctrl+0: về 100%. Ctrl+R: quét lại. {quit_hint}"
+            f"{shortcut.display_label(self._shortcut_binding)}: đưa tất cả màn hình về 100%, "
+            "dùng được cả khi cửa sổ đã ẩn và ở màn hình khóa. "
+            "Đổi phím này ở phần phím tắt trong cửa sổ.\n\n"
+            f"Ctrl+R: quét lại. {quit_hint}"
         )
         instructions.set_wrap(True)
         instructions.set_max_width_chars(60)
@@ -687,6 +727,176 @@ class BrightnessWindow(Gtk.ApplicationWindow):
         box.append(close)
         help_window.set_child(box)
         help_window.present()
+
+    def _load_shortcut(self, demo: bool) -> None:
+        if demo:
+            return
+        state = None
+        try:
+            if shortcut.available():
+                state = shortcut.ensure()
+                self._shortcut_global = True
+                watched = [
+                    (
+                        Gio.Settings.new_with_path(shortcut.CUSTOM_SCHEMA, shortcut.SHORTCUT_PATH),
+                        "changed::binding",
+                    ),
+                    (Gio.Settings.new(shortcut.MEDIA_KEYS_SCHEMA), "changed::custom-keybindings"),
+                ]
+                extension = shortcut.extension_settings()
+                if extension is not None:
+                    watched.append((extension, f"changed::{shortcut.EXTENSION_KEY}"))
+                self._shortcut_watchers = [
+                    (settings, settings.connect(signal, self._on_shortcut_changed))
+                    for settings, signal in watched
+                ]
+        except (BrightnessError, GLib.Error):
+            self._shortcut_global = False
+        self._show_shortcut(state)
+
+    def _on_shortcut_changed(self, *_arguments) -> None:
+        if self._closed:
+            return
+        # Extension chuyển phím từ custom shortcut sang chính nó sau khi GNOME Shell nạp lại.
+        try:
+            state = shortcut.read()
+        except (BrightnessError, GLib.Error):
+            return
+        self._show_shortcut(state)
+
+    def _show_shortcut(self, state: shortcut.ShortcutState | None) -> None:
+        binding = state.binding if state is not None else shortcut.DEFAULT_BINDING
+        self._shortcut_binding = binding
+        app = self.get_application()
+        if app is not None:
+            # Dự phòng trong cửa sổ; khi GNOME đã giữ phím này thì GNOME xử lý trước.
+            app.set_accels_for_action("app.reset-all", [binding] if binding else [])
+        self.shortcut_label.set_text(shortcut.display_label(binding))
+        self.shortcut_change.set_sensitive(self._shortcut_global)
+        self.shortcut_default.set_sensitive(
+            self._shortcut_global and binding != shortcut.normalize(shortcut.DEFAULT_BINDING)
+        )
+        if not self._shortcut_global:
+            self.shortcut_status.set_text(
+                "Không tìm thấy cài đặt phím tắt của GNOME nên phím chỉ dùng được "
+                "khi cửa sổ đang được chọn."
+            )
+            return
+        if not binding:
+            self.shortcut_status.set_text("Phím tắt đang tắt. Nhấn Đổi phím tắt để đặt lại.")
+            return
+        if state is not None and state.lock_screen:
+            text = (
+                "Dùng được ở mọi nơi: khi cửa sổ đã ẩn, khi đang dùng ứng dụng khác, "
+                "khi đã thoát hẳn ứng dụng và ở màn hình khóa."
+            )
+        else:
+            text = (
+                "Dùng được khi cửa sổ đã ẩn, khi đang dùng ứng dụng khác và khi đã thoát hẳn "
+                "ứng dụng. Chưa dùng được ở màn hình khóa. " + shortcut.extension_status()
+            )
+        found = shortcut.conflicts(binding)
+        if found:
+            text += "\nTrùng với: " + "; ".join(found) + ". Nên đổi sang tổ hợp khác."
+        self.shortcut_status.set_text(text)
+
+    def _save_shortcut(self, binding: str) -> str:
+        try:
+            state = shortcut.write(binding)
+        except (BrightnessError, GLib.Error) as exc:
+            return str(exc)
+        self._show_shortcut(state)
+        return ""
+
+    def _edit_shortcut(self, _button) -> None:
+        dialog = Gtk.Window(title="Đổi phím tắt", transient_for=self, modal=True)
+        dialog.set_default_size(460, -1)
+        dialog.set_resizable(False)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        box.add_css_class("main-panel")
+        box.append(label("Nhấn tổ hợp phím mới", "display-title"))
+        hint = label(
+            "Dùng ít nhất một phím Ctrl, Alt hoặc Super, hoặc một phím F1–F12. "
+            "Tránh các tổ hợp ứng dụng khác hay dùng như Ctrl+0 của trình duyệt. "
+            "Nhấn Esc để hủy.",
+            "muted",
+        )
+        hint.set_wrap(True)
+        hint.set_max_width_chars(55)
+        box.append(hint)
+        preview = label(shortcut.display_label(self._shortcut_binding), "shortcut-preview", 0.5)
+        box.append(preview)
+        warning = label("", "muted")
+        warning.set_wrap(True)
+        warning.set_max_width_chars(55)
+        box.append(warning)
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        disable = Gtk.Button(label="Tắt phím tắt")
+        disable.set_sensitive(bool(self._shortcut_binding))
+        buttons.append(disable)
+        buttons.append(Gtk.Box(hexpand=True))
+        cancel = Gtk.Button(label="Hủy")
+        buttons.append(cancel)
+        save = Gtk.Button(label="Lưu")
+        save.add_css_class("suggested-action")
+        save.set_sensitive(False)
+        buttons.append(save)
+        box.append(buttons)
+        dialog.set_child(box)
+        chosen = {"binding": None}
+
+        def apply(binding: str) -> None:
+            error = self._save_shortcut(binding)
+            if error:
+                warning.set_text(error)
+            else:
+                dialog.close()
+
+        def on_key(controller, keyval, keycode, state) -> bool:
+            mods = state & Gtk.accelerator_get_default_mod_mask()
+            if keyval == Gdk.KEY_Escape and not mods:
+                dialog.close()
+                return True
+            event = controller.get_current_event()
+            if event is not None and event.is_modifier():
+                return True
+            if event is not None:
+                # Lấy phím gốc theo bố cục bàn phím, ví dụ Shift+0 thành 0 thay vì ")".
+                ok, base, *_rest = dialog.get_display().translate_key(
+                    keycode, 0, event.get_layout()
+                )
+                if ok and base:
+                    keyval = base
+            keyval = Gdk.keyval_to_lower(keyval)
+            function_key = Gdk.KEY_F1 <= keyval <= Gdk.KEY_F35
+            if (not mods and not function_key) or not Gtk.accelerator_valid(keyval, mods):
+                warning.set_text("Tổ hợp này chưa dùng được. Thêm phím Ctrl, Alt hoặc Super.")
+                save.set_sensitive(False)
+                return True
+            binding = Gtk.accelerator_name(keyval, mods)
+            chosen["binding"] = binding
+            preview.set_text(shortcut.display_label(binding))
+            found = shortcut.conflicts(binding)
+            if found:
+                warning.set_text(
+                    "Trùng với phím tắt GNOME: " + "; ".join(found)
+                    + ". Nên chọn tổ hợp khác hoặc vẫn lưu nếu muốn."
+                )
+                save.set_label("Vẫn lưu")
+            else:
+                warning.set_text("Chưa thấy trùng với phím tắt nào của GNOME.")
+                save.set_label("Lưu")
+            save.set_sensitive(binding != self._shortcut_binding or bool(found))
+            return True
+
+        keys = Gtk.EventControllerKey()
+        keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", on_key)
+        dialog.add_controller(keys)
+        disable.connect("clicked", lambda _button: apply(""))
+        cancel.connect("clicked", lambda _button: dialog.close())
+        save.connect("clicked", lambda _button: apply(chosen["binding"]))
+        dialog.present()
 
     def hide_to_background(self) -> None:
         if self._closing or self._closed:
@@ -740,6 +950,9 @@ class BrightnessWindow(Gtk.ApplicationWindow):
             return True
         self._closed = True
         self._cleanup_watchers()
+        for settings, handler in self._shortcut_watchers:
+            settings.disconnect(handler)
+        self._shortcut_watchers.clear()
         if self.tray is not None:
             self.tray.close()
             self.tray = None
@@ -765,7 +978,7 @@ class BrightnessApplication(Gtk.Application):
         self.demo = demo
         self.window = None
         self._held = False
-        for name in ("refresh", "quit", "full-quit", "full-brightness"):
+        for name in ("refresh", "quit", "full-quit", "reset-all"):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", self._on_action)
             self.add_action(action)
@@ -774,15 +987,14 @@ class BrightnessApplication(Gtk.Application):
         self.add_action(external)
         self.set_accels_for_action("app.refresh", ["<Primary>r"])
         self.set_accels_for_action("app.quit", ["<Primary>q"])
-        self.set_accels_for_action("app.full-brightness", ["<Primary>0"])
 
     def _on_action(self, action, _parameter) -> None:
         if self.window:
             name = action.get_name()
             if name == "refresh":
                 self.window.refresh()
-            elif name == "full-brightness":
-                self.window.reset_to_full()
+            elif name == "reset-all":
+                self.window.reset_all_to_full()
             elif name == "full-quit":
                 self.window.quit_completely()
             else:

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.ubuntu-brightness"
+          path="/org/gnome/shell/extensions/ubuntu-brightness/">
+    <key name="reset-all" type="as">
+      <default><![CDATA[['<Super><Alt>0']]]></default>
+      <summary>Phím tắt đưa tất cả màn hình về 100%</summary>
+    </key>
+    <key name="command" type="s">
+      <default>''</default>
+      <summary>Lệnh chạy khi nhấn phím tắt</summary>
+    </key>
+  </schema>
+</schemalist>

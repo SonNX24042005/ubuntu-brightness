@@ -11,16 +11,14 @@ from .models import BrightnessError, validate_percent
 from .xrandr import XrandrBackend, is_wayland
 
 
-def _notify_running_app(mode: str, identifier: str, percent: int) -> None:
+APP_IDS = ("io.github.ubuntubrightness", "io.github.ubuntubrightness.hardware")
+
+
+def _activate_running_app(app_id: str, action: str, parameters: list) -> bool:
     try:
         from gi.repository import Gio, GLib
     except ImportError:
-        return
-    app_id = (
-        "io.github.ubuntubrightness.hardware"
-        if mode == "hardware"
-        else "io.github.ubuntubrightness"
-    )
+        return False
     object_path = "/" + app_id.replace(".", "/")
     try:
         bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
@@ -29,17 +27,77 @@ def _notify_running_app(mode: str, identifier: str, percent: int) -> None:
             object_path,
             "org.gtk.Actions",
             "Activate",
-            GLib.Variant(
-                "(sava{sv})",
-                ("external-set", [GLib.Variant("(si)", (identifier, percent))], {}),
-            ),
+            GLib.Variant("(sava{sv})", (action, parameters, {})),
             None,
             Gio.DBusCallFlags.NO_AUTO_START,
             500,
             None,
         )
     except GLib.Error:
-        pass
+        return False
+    return True
+
+
+def _notify_running_app(mode: str, identifier: str, percent: int) -> None:
+    try:
+        from gi.repository import GLib
+    except ImportError:
+        return
+    app_id = APP_IDS[1] if mode == "hardware" else APP_IDS[0]
+    _activate_running_app(app_id, "external-set", [GLib.Variant("(si)", (identifier, percent))])
+
+
+def _reset_all(mode: str, demo: bool) -> int:
+    # Ứng dụng đang chạy tự áp dụng để không tranh chấp với cơ chế giữ mức sáng.
+    if not demo:
+        handled = [app_id for app_id in APP_IDS if _activate_running_app(app_id, "reset-all", [])]
+        if handled:
+            print("Đã yêu cầu ứng dụng đang chạy đưa tất cả màn hình về 100%.")
+            return 0
+    backend = create_backend(mode, demo)
+    failed = 0
+    for item in backend.discover().displays:
+        if not item.available:
+            continue
+        try:
+            brightness = backend.set(item, 100)
+        except BrightnessError as exc:
+            failed += 1
+            print(f"{item.name}: {exc}", file=sys.stderr)
+        else:
+            print(f"{item.name}: {brightness.percent}%")
+    return 1 if failed else 0
+
+
+def _shortcut(options) -> int:
+    try:
+        from . import shortcut
+    except (ImportError, ValueError) as exc:
+        raise BrightnessError(
+            "Thiếu GTK 4 hoặc PyGObject. Chạy ./scripts/install.sh trước."
+        ) from exc
+    if options.set is not None:
+        state = shortcut.write(options.set)
+    elif options.disable:
+        state = shortcut.write("")
+    elif options.default:
+        state = shortcut.write(shortcut.DEFAULT_BINDING)
+    elif options.ensure:
+        state = shortcut.ensure()
+    else:
+        state = shortcut.read()
+    if not state.installed:
+        print("Chưa tạo phím tắt. Chạy lệnh với --default để tạo phím mặc định.")
+        return 0
+    print(f"Phím tắt đưa tất cả màn hình về 100%: {shortcut.display_label(state.binding)}")
+    if state.lock_screen:
+        print("Dùng được ở màn hình khóa qua extension GNOME Shell.")
+    else:
+        print(f"Chưa dùng được ở màn hình khóa. {shortcut.extension_status()}")
+    if state.binding:
+        for name in shortcut.conflicts(state.binding):
+            print(f"Trùng với phím tắt khác: {name}", file=sys.stderr)
+    return 0
 
 
 def _quit_running_app() -> int:
@@ -55,7 +113,7 @@ def _quit_running_app() -> int:
         raise BrightnessError("Không thể kết nối D-Bus của phiên desktop hiện tại.") from exc
 
     stopped = 0
-    for app_id in ("io.github.ubuntubrightness", "io.github.ubuntubrightness.hardware"):
+    for app_id in APP_IDS:
         try:
             has_owner = bus.call_sync(
                 "org.freedesktop.DBus",
@@ -132,6 +190,13 @@ def main(argv: list[str] | None = None) -> int:
     setting = commands.add_parser("set", help="Điều chỉnh một màn hình theo mã từ lệnh list")
     setting.add_argument("display", help="Mã màn hình, ví dụ xrandr:HDMI-1")
     setting.add_argument("percent", type=int, help="Độ sáng từ 0 đến 100%")
+    commands.add_parser("reset", help="Đưa tất cả màn hình về 100%, dùng cho phím tắt toàn cục")
+    keys = commands.add_parser("shortcut", help="Xem hoặc đổi phím tắt toàn cục của GNOME")
+    choice = keys.add_mutually_exclusive_group()
+    choice.add_argument("--set", metavar="PHÍM", help="Tổ hợp phím mới, ví dụ '<Super><Alt>0'")
+    choice.add_argument("--disable", action="store_true", help="Tắt phím tắt toàn cục")
+    choice.add_argument("--default", action="store_true", help="Dùng lại phím mặc định Super+Alt+0")
+    choice.add_argument("--ensure", action="store_true", help="Tạo phím mặc định nếu chưa có")
     options = parser.parse_args(argv)
     # Xác thực trước khi dò phần cứng để giá trị sai không gây truy cập thiết bị.
     try:
@@ -139,6 +204,10 @@ def main(argv: list[str] | None = None) -> int:
             return _quit_running_app()
         if options.command == "set":
             validate_percent(options.percent)
+        if options.command == "reset":
+            return _reset_all(options.mode, options.demo)
+        if options.command == "shortcut":
+            return _shortcut(options)
         backend = create_backend(options.mode, options.demo)
         if options.command is None:
             try:

@@ -61,6 +61,10 @@ desktop.write_text(
 print(f"Đã tạo biểu tượng ứng dụng: {desktop}")
 PY
 
+if ! "$project_root/run.sh" shortcut --ensure; then
+    printf 'Chưa tạo được phím tắt toàn cục; phím chỉ dùng được khi cửa sổ đang được chọn.\n' >&2
+fi
+
 printf 'Mở ứng dụng bằng ./run.sh hoặc tìm “Độ sáng màn hình” trong menu ứng dụng.\n'
 if [[ "$launcher_only" == false ]]; then
     printf 'Nếu báo thiếu quyền, xem mục quyền truy cập trong README.md.\n'
